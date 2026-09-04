@@ -6,6 +6,18 @@
 #include "Wheel.hpp"
 #include "FaultInjector.hpp"
 
+// ── ECU slip-control thresholds ────────────────────────────────────────────
+// Declared in the header (not ABSController.cpp) so that unit tests can
+// reference these constants by name rather than duplicating magic numbers.
+
+// Slip above this triggers RELEASE (wheel is on the edge of lockup).
+inline constexpr double SLIP_THRESHOLD     = 0.20;
+// Slip below this triggers APPLY (plenty of grip left, safe to rebuild pressure).
+inline constexpr double LOW_SLIP_THRESHOLD = 0.05;
+// Maximum rate (m/s²) at which the ECU's reference speed is allowed to
+// decrease per cycle.
+inline constexpr double MAX_REF_DECEL      = 9.0;
+
 // Simple one-dimensional vehicle physics model.
 // Speed decreases proportionally to average brake pressure applied.
 class Vehicle {

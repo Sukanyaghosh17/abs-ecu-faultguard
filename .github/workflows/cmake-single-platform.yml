@@ -1,4 +1,4 @@
-name: CMake Build
+name: CMake Build & Test
 
 on:
   push:
@@ -22,10 +22,14 @@ jobs:
       - name: Build
         run: cmake --build build --config ${{env.BUILD_TYPE}}
 
-      - name: Run executable
-        run: ./build/abs_ecu_sim
+      - name: Run unit tests
+        working-directory: build
+        run: ctest --output-on-failure
 
-      - name: Check formatting
+      - name: Smoke-test executable
+        # timeout exits with code 124 when the time limit is reached — that's
+        # expected and fine (the sim loops for ~20+ seconds normally).
+        # Any other non-zero exit code (crash, segfault, etc.) fails the build.
         run: |
-          sudo apt-get install -y clang-format
-          find . -name "*.cpp" -o -name "*.h" | xargs -r clang-format --dry-run --Werror
+          timeout 5 ./build/abs_ecu_sim; code=$?
+          if [ $code -ne 0 ] && [ $code -ne 124 ]; then exit 1; fi

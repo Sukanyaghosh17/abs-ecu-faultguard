@@ -1,7 +1,6 @@
-````markdown
-# ABS ECU Simulation
+# ABS ECU FaultGuard
 
-A realistic, modular, C++17 simulation of an Anti-lock Braking System (ABS) Electronic Control Unit (ECU) for automotive embedded systems. The project demonstrates a closed‑loop control system with sensor input, ABS logic, and actuator output, running in a 20 ms real-time loop.
+A realistic, modular, C++17 simulation of an Anti-lock Braking System (ABS) Electronic Control Unit (ECU) for automotive embedded systems. The project demonstrates a closed-loop control system with sensor input, ABS logic, actuator output, and fault injection, running in a 20 ms real-time loop.
 
 ---
 
@@ -9,33 +8,36 @@ A realistic, modular, C++17 simulation of an Anti-lock Braking System (ABS) Elec
 
 This project simulates an ABS ECU that:
 
-- Monitors four wheel speeds
-- Estimates vehicle speed
-- Calculates wheel slip
-- Modulates brake pressure to prevent wheel lock
+- Monitors four independent wheel speed sensors
+- Estimates vehicle speed using a peak-hold / deceleration-limited reference estimator
+- Calculates per-wheel slip ratios
+- Modulates brake pressure to prevent wheel lock (APPLY / HOLD / RELEASE)
+- Injects configurable sensor faults at runtime to test ECU fault response
 
 Design principles:
 
-- Modular OOP architecture (sensor → control → actuator)
-- Real-time loop: 20 ms cycle using `std::chrono` and `std::thread`
+- Modular OOP architecture (sensor → fault injector → control → actuator)
+- Real-time loop: 20 ms cycle using `std::chrono` and `std::thread`
 - Slip-ratio-based control: APPLY / HOLD / RELEASE
-- Simplified physics
+- Simplified physics (wheel + vehicle plant model)
 - Gaussian sensor noise
-- CSV logging
+- CSV logging (full post-fault state)
 
 ---
 
 ## Features
 
-- Four independent wheel sensors with individual noise
-- Vehicle speed estimation (average of wheel speeds)
-- Slip calculation: `(V_veh - V_wheel)/V_veh`
-- ABS control logic
-- Pressure ramping (±10% per cycle)
-- Physics update
-- Real-time console output every 200 ms
-- CSV logging
+- Four independent wheel sensors with individual Gaussian noise
+- Peak-hold, deceleration-limited vehicle speed estimator (robust against simultaneous multi-wheel lockup)
+- Slip calculation: `(V_ref - V_wheel) / V_ref`
+- ABS control logic with three-state pressure modulation
+- Pressure ramping (+-10% per cycle)
+- Physics update (wheel and vehicle plant model)
+- Real-time console output every cycle
+- CSV logging — W0-W3 log the **post-fault sensor reading** used by the controller
 - Configurable constants (`constexpr`)
+- **Fault injection** — 3 fault types (bias, lockup, disconnected), configured via CLI flags
+- **2x2 visualization dashboard** — wheel speeds, vehicle speed vs. ECU reference, slip ratios, and brake pressures (with fault regions shaded)
 
 ---
 
@@ -45,115 +47,141 @@ Design principles:
 ```bash
 g++ main.cpp src/*.cpp -Iinclude -std=c++17 -O2 -Wall -o abs_ecu_sim
 ./abs_ecu_sim
-````
+```
 
-### Using CMake (optional)
-
-* Create `CMakeLists.txt` in the project root
-* Configure and build using standard CMake workflow
+### Using CMake
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+./build/abs_ecu_sim
+# Run unit tests:
+cd build && ctest --output-on-failure
+```
 
 ---
 
 ## Running
 
-* Starts at 30 m/s (~108 km/h)
-* Updates console every 200 ms
-* Generates `abs_log.csv` in project directory
+- Starts at 30 m/s (~108 km/h)
+- Generates `logs/abs_log.csv`
+- Run `python scripts/analyze_log.py` after simulation to produce the dashboard
 
 ---
 
-## CSV Log (`abs_log.csv`)
+## Fault Injection
 
-| Column              | Description               |
-| ------------------- | ------------------------- |
-| Time(s)             | Simulation time           |
-| Veh_Speed           | True vehicle speed        |
-| Est_Veh_Speed       | Estimated vehicle speed   |
-| W0_Speed … W3_Speed | Wheel speeds before noise |
-| P0 … P3             | Brake pressures per wheel |
-| S0 … S3             | Wheel ABS active flags    |
-| ABS_Active          | Overall ABS flag          |
+Inject sensor faults via one or more `--fault` flags on the command line:
 
-**Example:**
+```
+./abs_ecu_sim --fault wheel=N type=TYPE [bias=V]
+```
+
+| Type | Description | Extra parameter |
+| -------------- | --------------------------------------------- | ---------------------- |
+| `bias` | Adds a fixed offset to every reading (m/s) | `bias=V` (required) |
+| `lockup` | Forces wheel reading near zero (~0.1 m/s) | — |
+| `disconnected` | Forces wheel reading to exactly 0.0 m/s | — |
+
+**Examples:**
+
+```bash
+# Wheel 2 appears locked up (seized caliper simulation):
+./abs_ecu_sim --fault wheel=2 type=lockup
+
+# Wheel 0 reads 5 m/s too high (electromagnetic interference):
+./abs_ecu_sim --fault wheel=0 type=bias bias=5.0
+
+# Wheel 3 sensor wire is open-circuit:
+./abs_ecu_sim --fault wheel=3 type=disconnected
+
+# Multiple simultaneous faults:
+./abs_ecu_sim --fault wheel=0 type=lockup --fault wheel=1 type=bias bias=-3.0
+```
+
+The ECU is completely unaware of whether a reading is faulted — it operates on the (possibly corrupted) value exactly as it would in a real embedded system.
+
+---
+
+## CSV Log (`logs/abs_log.csv`)
+
+| Column | Description |
+| ----------------------- | ------------------------------------------------------------------- |
+| `Time(s)` | Simulation time (seconds) |
+| `Veh_Speed` | True vehicle speed (m/s) |
+| `Est_Veh_Speed` | ECU peak-hold reference speed estimate (m/s) |
+| `W0_Speed`...`W3_Speed` | **Post-fault sensor reading** used by the controller (m/s) — reflects bias/lockup/disconnected effects |
+| `P0`...`P3` | Brake pressure per wheel (%, 0-100) |
+| `S0`...`S3` | Per-wheel ABS active flag (1 = this wheel is currently releasing pressure) |
+| `F0`...`F3` | Fault type index per wheel (0=none, 1=bias, 2=lockup, 3=disconnected) |
+| `ABS_Active` | Overall ABS flag (1 = at least one wheel releasing pressure) |
+
+**Example row (wheel 0 lockup fault active):**
 
 ```csv
-Time(s),Veh_Speed,Est_Veh_Speed,W0_Speed,W1_Speed,W2_Speed,W3_Speed,P0,P1,P2,P3,S0,S1,S2,S3,ABS_Active
-0.000,30.000,29.992,30.000,30.000,30.000,30.000,10.000,10.000,10.000,10.000,0,0,0,0,0
-0.020,29.984,29.879,29.950,29.950,29.950,29.950,20.000,20.000,20.000,20.000,0,0,0,0,0
+Time(s),Veh_Speed,Est_Veh_Speed,W0_Speed,W1_Speed,W2_Speed,W3_Speed,P0,P1,P2,P3,S0,S1,S2,S3,F0,F1,F2,F3,ABS_Active
+0.020,29.984,29.982,0.100,29.950,29.950,29.950,10.000,20.000,20.000,20.000,1,0,0,0,2,0,0,0,1
 ```
 
 ---
 
-## Console Output (every 200 ms)
+## Console Output
 
 ```text
-t = 0.20 s | Vehicle: 29.84 m/s | Est. Veh: 29.90 m/s
-  Wheel 0: 29.82 m/s | 30.00% | APPLY
+t = 0.20 s | Vehicle: 29.84 m/s | Ref: 29.90 m/s
+  Wheel 0: 0.10 m/s | 10.00% | RELEASE [FAULT:lockup]
   Wheel 1: 29.85 m/s | 30.00% | APPLY
   Wheel 2: 29.83 m/s | 30.00% | APPLY
   Wheel 3: 29.86 m/s | 30.00% | APPLY
-------------------------------------------------------------
-t = 2.00 s | Vehicle: 23.45 m/s | Est. Veh: 21.10 m/s
-  Wheel 0: 18.76 m/s | 80.00% | RELEASE
-  Wheel 1: 18.80 m/s | 80.00% | RELEASE
-  Wheel 2: 18.78 m/s | 80.00% | RELEASE
-  Wheel 3: 18.82 m/s | 80.00% | RELEASE
+------------------------------
 ```
 
 ---
 
 ## Architecture
 
-* **BrakeActuator** – hydraulic actuator with BrakeState (APPLY/HOLD/RELEASE)
-* **WheelSpeedSensor** – wheel speed sensor with Gaussian noise
-* **Vehicle** – updates vehicle speed based on brake pressures
-* **ABSController** – manages sensors/actuators, calculates slip, commands brakes, logs CSV
-* **main()** – real-time loop: ECU logic, physics update, console logging
+- **BrakeActuator** — hydraulic actuator with `BrakeState` (APPLY/HOLD/RELEASE) and pressure ramping
+- **WheelSpeedSensor** — wheel speed sensor with Gaussian noise
+- **FaultInjector** — sits between the raw sensor and the ECU; applies per-wheel fault transforms
+- **Vehicle** — updates vehicle speed based on average brake pressure (plant model)
+- **ABSController** — manages sensors/actuators, runs peak-hold estimator, calculates slip, commands brakes, logs CSV
+- **main()** — real-time loop: CLI fault parsing -> ECU control cycle -> physics update -> console output
 
 ---
 
 ## Simulation Parameters (`constexpr`)
 
-| Constant           | Description                                                  |
-| ------------------ | ------------------------------------------------------------ |
-| DT                 | Control cycle (s), default 0.020                             |
-| INITIAL_SPEED      | Start speed (m/s), default 30.0                              |
-| SLIP_THRESHOLD     | Slip above which ABS releases pressure, default 0.20         |
-| LOW_SLIP_THRESHOLD | Slip below which ABS reapplies pressure, default 0.05        |
-| PRESSURE_STEP      | Pressure change per cycle (%), default 10.0                  |
-| MAX_PRESSURE       | Max brake pressure (%), default 100.0                        |
-| MAX_WHEEL_DECEL    | Max wheel deceleration (m/s²), default 25.0                  |
-| RECOVERY_RATE      | Wheel recovery rate when brake released (m/s²), default 15.0 |
-| MAX_VEH_DECEL      | Max vehicle deceleration (m/s²), default 8.0                 |
+| Constant | Description |
+| --------------------- | ------------------------------------------------------------ |
+| `DT` | Control cycle (s), default 0.020 |
+| `INITIAL_SPEED` | Start speed (m/s), default 30.0 |
+| `SLIP_THRESHOLD` | Slip above which ABS releases pressure, default 0.20 |
+| `LOW_SLIP_THRESHOLD` | Slip below which ABS reapplies pressure, default 0.05 |
+| `MAX_PRESSURE` | Max brake pressure (%), default 100.0 |
+| `MAX_WHEEL_DECEL` | Max wheel deceleration (m/s^2), default 25.0 |
+| `RECOVERY_RATE` | Wheel recovery rate when brake released (m/s^2), default 15.0 |
+| `MAX_VEH_DECEL` | Max vehicle deceleration (m/s^2), default 8.0 |
+| `MAX_REF_DECEL` | Max rate at which ECU reference speed may decrease (m/s^2), default 9.0 |
 
 ---
 
 ## Simulation Results
 
-Vehicle speed over time:
-![Vehicle Speed](figures/vehicle_speed.png)
+2x2 dashboard (vehicle speed, wheel speeds, slip ratios, brake pressures):
 
-Brake pressures per wheel:
-![Brake Pressure](figures/brake_pressure.png)
-
-ABS activation timeline:
-![ABS Active](figures/abs_active_timeline.png)
+![ABS Dashboard](figures/abs_dashboard.png)
 
 ---
 
 ## Future Enhancements
 
-* Advanced ABS algorithms (PID, adaptive slip)
-* Enhanced physics (load transfer, per-wheel friction)
-* CAN bus simulation
-* Sensor/actuator fault injection
-* Real-time visualization
-* HIL testing
-* Unit testing with Google Test or Catch2
-* Multi-threaded sensor/control/logging threads
+- Advanced ABS algorithms (PID, adaptive slip)
+- Enhanced physics (load transfer, per-wheel friction coefficient)
+- CAN bus simulation
+- HIL testing
+- Multi-threaded sensor/control/logging threads
 
 ---
 
 ## Repository
 
-[https://github.com/ulvinamazow/embedded_abs_ecu](https://github.com/ulvinamazow/embedded_abs_ecu)
+[https://github.com/Sukanyaghosh17/abs-ecu-faultguard](https://github.com/Sukanyaghosh17/abs-ecu-faultguard)

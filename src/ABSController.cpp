@@ -5,22 +5,14 @@
 
 using namespace std;
 
-// ── ECU slip-control thresholds ────────────────────────────────────────────
-// Slip above this triggers RELEASE (wheel is on the edge of lockup).
-constexpr double SLIP_THRESHOLD     = 0.20;
-// Slip below this triggers APPLY (plenty of grip left, safe to rebuild pressure).
-constexpr double LOW_SLIP_THRESHOLD = 0.05;
+// ── ECU slip-control thresholds & reference speed rate ───────────────────
+// These constants are defined as inline constexpr in ABSController.hpp
+// so that unit tests can reference them by name.
+// (SLIP_THRESHOLD, LOW_SLIP_THRESHOLD, MAX_REF_DECEL)
 
 // ── Vehicle physics constants ──────────────────────────────────────────────
 constexpr double MAX_PRESSURE  = 100.0;
 constexpr double MAX_VEH_DECEL = 8.0;
-
-// ── Reference speed estimator ──────────────────────────────────────────────
-// Maximum rate (m/s²) at which the ECU's reference speed is allowed to
-// decrease per cycle.  Set conservatively equal to the maximum physical
-// vehicle deceleration so the reference always stays at or above where a
-// real vehicle could actually be decelerating to.
-constexpr double MAX_REF_DECEL = 9.0;
 
 
 // ════════════════════════════════════════════════════════════════════════════
