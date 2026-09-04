@@ -1,0 +1,31 @@
+name: CMake Build
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+
+      - name: Build
+        run: cmake --build build --config ${{env.BUILD_TYPE}}
+
+      - name: Run executable
+        run: ./build/abs_ecu_sim
+
+      - name: Check formatting
+        run: |
+          sudo apt-get install -y clang-format
+          find . -name "*.cpp" -o -name "*.h" | xargs -r clang-format --dry-run --Werror
