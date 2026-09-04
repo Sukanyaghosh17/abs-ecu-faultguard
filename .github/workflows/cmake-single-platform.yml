@@ -30,6 +30,13 @@ jobs:
         # timeout exits with code 124 when the time limit is reached — that's
         # expected and fine (the sim loops for ~20+ seconds normally).
         # Any other non-zero exit code (crash, segfault, etc.) fails the build.
+        # set +e prevents bash -e from aborting immediately on exit code 124.
         run: |
-          timeout 5 ./build/abs_ecu_sim; code=$?
-          if [ $code -ne 0 ] && [ $code -ne 124 ]; then exit 1; fi
+          set +e
+          timeout 5 ./build/abs_ecu_sim
+          code=$?
+          set -e
+          if [ $code -ne 0 ] && [ $code -ne 124 ]; then
+            echo "Simulator crashed with exit code $code"
+            exit 1
+          fi
