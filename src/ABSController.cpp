@@ -184,9 +184,12 @@ void ABSController::control_cycle(double sim_time, double dt) {
                  << vehicle.get_speed() << ","
                  << ref_speed_       << ",";
 
-        // True (pre-noise, pre-fault) wheel speeds for physics reference.
+        // Post-fault sensor readings — the same values used by slip
+        // calculation and the reference speed estimator.  Logging these
+        // (instead of the raw true speed) makes fault effects (lockup, bias,
+        // disconnected) visible in the CSV and the visualization dashboard.
         for (int i = 0; i < 4; i++)
-            log_file << sensors[i].get_true_speed() << ",";
+            log_file << readings[i] << ",";
 
         // Brake pressures per wheel.
         for (int i = 0; i < 4; i++)
