@@ -57,10 +57,22 @@ CANFrame pack_abs_status(double timestamp, const std::vector<BrakeState>& states
 
 void unpack_abs_status(const CANFrame& frame, std::vector<BrakeState>& states_out, bool& abs_active_out) {
     states_out.resize(4);
-    states_out[0] = static_cast<BrakeState>(frame.data[0] & 0x03);
-    states_out[1] = static_cast<BrakeState>((frame.data[0] >> 2) & 0x03);
-    states_out[2] = static_cast<BrakeState>(frame.data[1] & 0x03);
-    states_out[3] = static_cast<BrakeState>((frame.data[1] >> 2) & 0x03);
+
+    // Defensive check: 2-bit extraction (data & 0x03) can produce value 3, which has no
+    // corresponding BrakeState (only 0=APPLY, 1=HOLD, 2=RELEASE are valid).
+    // Clamp to BrakeState::HOLD as a safe default against corrupted/malformed CAN payloads
+    // rather than casting an invalid value into the enum (not something that occurs in normal operation).
+    auto safe_brake_state = [](uint8_t raw) -> BrakeState {
+        if (raw > 2) {
+            return BrakeState::HOLD;
+        }
+        return static_cast<BrakeState>(raw);
+    };
+
+    states_out[0] = safe_brake_state(frame.data[0] & 0x03);
+    states_out[1] = safe_brake_state((frame.data[0] >> 2) & 0x03);
+    states_out[2] = safe_brake_state(frame.data[1] & 0x03);
+    states_out[3] = safe_brake_state((frame.data[1] >> 2) & 0x03);
     abs_active_out = (frame.data[2] != 0);
 }
 

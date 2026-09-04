@@ -143,6 +143,7 @@ Time(s),Veh_Speed,Est_Veh_Speed,W0_Speed,W1_Speed,W2_Speed,W3_Speed,P0,P1,P2,P3,
 ## Console Output
 
 ```text
+>>> [DIAGNOSTIC EVENT] DTC RAISED: C0031 at t = 0.20 s
 t = 0.20 s | Vehicle: 29.84 m/s | Ref: 29.90 m/s
   Wheel 0: 0.10 m/s | 10.00% | RELEASE [FAULT:lockup]
   Wheel 1: 29.85 m/s | 30.00% | APPLY
@@ -172,6 +173,7 @@ t = 0.20 s | Vehicle: 29.84 m/s | Ref: 29.90 m/s
 | --------------------- | ------------------------------------------------------------ |
 | `DT` | Control cycle (s), default 0.020 |
 | `INITIAL_SPEED` | Start speed (m/s), default 30.0 |
+| `PRESSURE_STEP` | Pressure change per cycle (%), default 10.0 |
 | `SLIP_THRESHOLD` | Slip above which ABS releases pressure, default 0.20 |
 | `LOW_SLIP_THRESHOLD` | Slip below which ABS reapplies pressure, default 0.05 |
 | `MAX_PRESSURE` | Max brake pressure (%), default 100.0 |

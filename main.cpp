@@ -4,6 +4,7 @@
 #include <chrono>
 #include <iomanip>
 #include <algorithm>
+#include <filesystem>
 
 #include "ABSController.hpp"
 #include "FaultInjector.hpp"
@@ -47,9 +48,11 @@ static void parse_faults(int argc, char* argv[], FaultInjector& injector) {
         if (arg != "--fault")
             continue;
 
-        int       wheel    = -1;
-        FaultType ftype    = FaultType::NONE;
-        double    bias_val = 0.0;
+        int       wheel       = -1;
+        FaultType ftype       = FaultType::NONE;
+        double    bias_val    = 0.0;
+        bool      has_bias    = false;
+        bool      parse_error = false;
 
         // Consume key=value tokens until we hit the next flag or end of args.
         while (i < argc && string(argv[i]).find('=') != string::npos) {
@@ -58,30 +61,46 @@ static void parse_faults(int argc, char* argv[], FaultInjector& injector) {
             string key = kv.substr(0, eq);
             string val = kv.substr(eq + 1);
 
-            if (key == "wheel") {
-                wheel = stoi(val);
-            } else if (key == "type") {
-                if      (val == "bias")         ftype = FaultType::BIAS;
-                else if (val == "lockup")       ftype = FaultType::LOCKUP;
-                else if (val == "disconnected") ftype = FaultType::DISCONNECTED;
-                else {
-                    cerr << "[WARN] Unknown fault type '" << val
-                         << "' — ignoring.\n";
+            try {
+                if (key == "wheel") {
+                    wheel = stoi(val);
+                } else if (key == "type") {
+                    if      (val == "bias")         ftype = FaultType::BIAS;
+                    else if (val == "lockup")       ftype = FaultType::LOCKUP;
+                    else if (val == "disconnected") ftype = FaultType::DISCONNECTED;
+                    else {
+                        cerr << "Warning: invalid --fault argument '" << kv
+                             << "', ignoring.\n";
+                        parse_error = true;
+                    }
+                } else if (key == "bias") {
+                    bias_val = stod(val);
+                    has_bias = true;
                 }
-            } else if (key == "bias") {
-                bias_val = stod(val);
+            } catch (const std::exception&) {
+                cerr << "Warning: invalid --fault argument '" << kv
+                     << "', ignoring.\n";
+                parse_error = true;
             }
         }
 
+        if (parse_error)
+            continue;
+
         // Validate and register the fault.
         if (wheel < 0 || wheel >= FaultInjector::NUM_WHEELS) {
-            cerr << "[WARN] Invalid wheel index " << wheel
+            cerr << "Warning: invalid wheel index " << wheel
                  << " — must be 0-3. Skipping.\n";
             continue;
         }
         if (ftype == FaultType::NONE) {
-            cerr << "[WARN] No valid type specified for --fault wheel=" << wheel
+            cerr << "Warning: no valid type specified for --fault wheel=" << wheel
                  << " — skipping.\n";
+            continue;
+        }
+        if (ftype == FaultType::BIAS && !has_bias) {
+            cerr << "Warning: type=bias specified for wheel " << wheel
+                 << " without a bias= value — skipping.\n";
             continue;
         }
 
@@ -92,6 +111,8 @@ static void parse_faults(int argc, char* argv[], FaultInjector& injector) {
 // ── Main ──────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
+    std::filesystem::create_directories("logs");
+
     cout << "ABS ECU Simulation Started\n";
     cout << "  Initial speed : " << INITIAL_SPEED << " m/s ("
          << fixed << setprecision(1) << INITIAL_SPEED * 3.6 << " km/h)\n";

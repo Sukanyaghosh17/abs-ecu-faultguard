@@ -53,9 +53,6 @@ public:
 class ABSController {
 
 private:
-    std::vector<WheelSpeedSensor> sensors;
-    std::vector<BrakeActuator>   actuators;
-
     Vehicle& vehicle;
 
     // Peak-hold, deceleration-limited reference speed (m/s).
@@ -64,6 +61,9 @@ private:
 
     // Optional fault injector — nullptr means no faults active.
     FaultInjector* fault_injector_;
+
+    std::vector<WheelSpeedSensor> sensors;
+    std::vector<BrakeActuator>   actuators;
 
     DiagnosticsManager diagnostics_;
     CANBus             can_bus_;
