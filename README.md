@@ -1,5 +1,7 @@
 # ABS ECU FaultGuard
 
+[![CMake Build & Test](https://github.com/Sukanyaghosh17/abs-ecu-faultguard/actions/workflows/cmake-single-platform.yml/badge.svg)](https://github.com/Sukanyaghosh17/abs-ecu-faultguard/actions/workflows/cmake-single-platform.yml)
+
 A realistic, modular, C++17 simulation of an Anti-lock Braking System (ABS) Electronic Control Unit (ECU) for automotive embedded systems. The project demonstrates a closed-loop control system with sensor input, ABS logic, actuator output, and fault injection, running in a 20 ms real-time loop.
 
 ---
@@ -54,7 +56,18 @@ g++ main.cpp src/*.cpp -Iinclude -std=c++17 -O2 -Wall -o abs_ecu_sim
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ./build/abs_ecu_sim
-# Run unit tests:
+```
+
+---
+
+## Testing
+
+Unit tests are implemented with GoogleTest (fetched automatically via CMake `FetchContent`). The current suite includes 19 tests covering the `SlipCalculation`, `StateTransition`, `FaultInjector`, and `ReferenceSpeed` suites.
+
+Run tests locally:
+
+```bash
+cmake -B build && cmake --build build
 cd build && ctest --output-on-failure
 ```
 
