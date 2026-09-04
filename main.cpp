@@ -198,6 +198,6 @@ int main(int argc, char* argv[]) {
         cout << "------------------------------\n";
     }
 
-    cout << "\nSimulation finished. Log saved to logs/abs_log.csv\n";
+    cout << "\nSimulation finished. Logs saved to logs/abs_log.csv and logs/can_bus.csv\n";
     return 0;
 }

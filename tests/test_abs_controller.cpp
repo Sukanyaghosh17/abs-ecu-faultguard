@@ -26,8 +26,13 @@
 
 #include "ABSController.hpp"   // also pulls in SLIP_THRESHOLD, LOW_SLIP_THRESHOLD, MAX_REF_DECEL
 #include "FaultInjector.hpp"
+#include "DiagnosticsManager.hpp"
+#include "CANBus.hpp"
 #include "Sensor.hpp"
 #include "Wheel.hpp"
+#include <fstream>
+#include <sstream>
+#include <cstdio>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: build a Vehicle + ABSController pair initialised at `init_speed`,
@@ -120,6 +125,24 @@ TEST(SlipCalculation, NoCrashWhenReferenceSpeedBelowGuard) {
     // Should not throw, assert, or crash.  Actuators stay at their default
     // (constructed) state since control_cycle() returned early.
     EXPECT_NO_THROW(rig.step());
+}
+
+// All 4 wheels simultaneously locked (original bug scenario):
+// When all wheels drop to 0, peak-hold reference must hold above wheel speeds
+// (~29.82 m/s), resulting in slip ≈ 1.0 > SLIP_THRESHOLD across all 4 wheels.
+// All four actuators must command RELEASE.
+TEST(SlipCalculation, FourWheelSimultaneousLockupCommandsRelease) {
+    TestRig rig(30.0);
+    rig.set_all_wheel_speeds(0.0);
+    rig.step();
+
+    EXPECT_GE(rig.ecu.estimate_vehicle_speed(), 29.0)
+        << "Peak-hold estimator must maintain reference near 29.82 m/s during full lockup";
+
+    for (const auto& act : rig.ecu.get_actuators()) {
+        EXPECT_EQ(act.get_state(), BrakeState::RELEASE)
+            << "All 4 actuators must command RELEASE when all 4 wheels lock simultaneously";
+    }
 }
 
 
@@ -254,6 +277,20 @@ TEST(FaultInjector, FaultsArePerWheelIndependent) {
     EXPECT_DOUBLE_EQ(fi.apply(1, 20.0), 20.0);
 }
 
+// Clearing a fault (setting FaultType::NONE on a wheel that previously had a fault)
+// correctly reverts behavior to pass-through.
+TEST(FaultInjector, ClearFaultRevertsToPassThrough) {
+    FaultInjector fi;
+    fi.set_fault(0, FaultType::LOCKUP);
+    EXPECT_DOUBLE_EQ(fi.apply(0, 25.0), 0.1);
+    EXPECT_EQ(fi.get_fault_type(0), FaultType::LOCKUP);
+
+    // Revert to NONE
+    fi.set_fault(0, FaultType::NONE);
+    EXPECT_DOUBLE_EQ(fi.apply(0, 25.0), 25.0);
+    EXPECT_EQ(fi.get_fault_type(0), FaultType::NONE);
+}
+
 
 // =============================================================================
 // Suite 4: Reference Speed Estimator (peak-hold / decel-limited)
@@ -330,4 +367,232 @@ TEST(ReferenceSpeed, RefDoesNotGoNegative) {
 
     EXPECT_GE(rig.ecu.estimate_vehicle_speed(), 0.0)
         << "Reference speed must never go negative";
+}
+
+// Single wheel positive bias pulls up estimator:
+// When one wheel reads far above true speed, the peak-hold estimator anchors
+// to that maximum reading, pulling the global reference up with it.
+TEST(ReferenceSpeed, SingleWheelPositiveBiasPullsUpEstimator) {
+    Vehicle vehicle(30.0);
+    ABSController ecu(vehicle, 30.0);
+    FaultInjector fi;
+    fi.set_fault(0, FaultType::BIAS, 20.0); // +20 m/s bias on wheel 0
+    ecu.set_fault_injector(&fi);
+
+    for (int i = 0; i < 4; i++) {
+        ecu.get_sensors()[i].update(30.0);
+    }
+    ecu.control_cycle(0.0, 0.020);
+
+    // Wheel 0 reads ~30 + 20 = 50 m/s. Estimator should be pulled up to ~50 m/s.
+    EXPECT_GE(ecu.estimate_vehicle_speed(), 45.0)
+        << "Single wheel with high positive bias should pull up peak-hold reference speed";
+}
+
+
+// =============================================================================
+// Suite 5: Regression Tests
+// =============================================================================
+
+// Regression test for CSV logging bug:
+// Asserts that when a fault is active, the value written to the CSV for that
+// wheel matches the post-fault readings[i] value (from FaultInjector::apply),
+// NOT the sensor's raw/true physical speed.
+TEST(Regression, CSVLoggingLogsPostFaultValueNotRawSpeed) {
+    const std::string test_csv = "test_abs_log_regression.csv";
+    std::remove(test_csv.c_str());
+
+    Vehicle vehicle(30.0);
+    {
+        ABSController ecu(vehicle, 30.0, test_csv);
+        FaultInjector fi;
+        fi.set_fault(0, FaultType::LOCKUP); // Forces 0.1 m/s
+        ecu.set_fault_injector(&fi);
+
+        // Physical wheels are spinning at 30.0 m/s
+        for (int i = 0; i < 4; i++) {
+            ecu.get_sensors()[i].update(30.0);
+        }
+
+        ecu.control_cycle(0.020, 0.020);
+    } // destructor flushes and closes log_file
+
+    std::ifstream file(test_csv);
+    ASSERT_TRUE(file.is_open()) << "Failed to open test CSV log";
+
+    std::string header_line, data_line;
+    std::getline(file, header_line);
+    ASSERT_TRUE(std::getline(file, data_line));
+    file.close();
+    std::remove(test_csv.c_str());
+
+    // Header: Time(s),Veh_Speed,Est_Veh_Speed,W0_Speed,W1_Speed,...
+    std::stringstream ss(data_line);
+    std::string token;
+    std::vector<std::string> tokens;
+    while (std::getline(ss, token, ',')) {
+        tokens.push_back(token);
+    }
+
+    ASSERT_GE(tokens.size(), 4u);
+    double w0_logged = std::stod(tokens[3]);
+
+    // The post-fault value for LOCKUP is 0.100 m/s, whereas raw true speed is ~30.0 m/s.
+    EXPECT_NEAR(w0_logged, 0.100, 0.05)
+        << "W0_Speed in CSV must be the post-fault reading (~0.1 m/s), not true speed (~30 m/s)";
+    EXPECT_LT(w0_logged, 5.0);
+}
+
+
+// =============================================================================
+// Suite 6: DiagnosticsManager
+// =============================================================================
+
+// Circuit fault DTC (C0031-C0034) is raised after CIRCUIT_FAULT_THRESHOLD_CYCLES
+// consecutive cycles of near-zero reading while vehicle is in motion (ref > 5.0).
+TEST(DiagnosticsManager, CircuitFaultDTCRaisedAfterConsecutiveZeroReadings) {
+    DiagnosticsManager diag;
+    std::vector<double> readings = {0.0, 30.0, 30.0, 30.0};
+    std::vector<BrakeState> states(4, BrakeState::APPLY);
+    double ref = 30.0;
+
+    // Run 9 cycles: below threshold (10), DTC should not be active yet
+    for (int i = 0; i < 9; i++) {
+        diag.evaluate_cycle(i * 0.020, readings, ref, states);
+        EXPECT_FALSE(diag.has_dtc(DTC::C0031_W0_SENSOR_CIRCUIT));
+    }
+
+    // 10th cycle: threshold reached, C0031 must be raised
+    diag.evaluate_cycle(0.180, readings, ref, states);
+    EXPECT_TRUE(diag.has_dtc(DTC::C0031_W0_SENSOR_CIRCUIT));
+    EXPECT_EQ(diag.get_active_dtcs_string(), "C0031");
+}
+
+// Circuit fault DTC clears when wheel sensor reading recovers above 1.0 m/s.
+TEST(DiagnosticsManager, CircuitFaultDTCClearsWhenSensorRecovers) {
+    DiagnosticsManager diag;
+    std::vector<double> faulted_readings = {0.0, 30.0, 30.0, 30.0};
+    std::vector<BrakeState> states(4, BrakeState::APPLY);
+    double ref = 30.0;
+
+    for (int i = 0; i < 10; i++) {
+        diag.evaluate_cycle(i * 0.020, faulted_readings, ref, states);
+    }
+    ASSERT_TRUE(diag.has_dtc(DTC::C0031_W0_SENSOR_CIRCUIT));
+
+    // Sensor recovers to normal speed
+    std::vector<double> recovered_readings = {30.0, 30.0, 30.0, 30.0};
+    diag.evaluate_cycle(0.200, recovered_readings, ref, states);
+
+    EXPECT_FALSE(diag.has_dtc(DTC::C0031_W0_SENSOR_CIRCUIT));
+    EXPECT_EQ(diag.get_active_dtcs_string(), "NONE");
+}
+
+// Implausible reference DTC (C0040) is raised when a wheel reading is far above ref.
+TEST(DiagnosticsManager, ImplausibleReferenceDTCRaisedWhenSensorFarAboveRef) {
+    DiagnosticsManager diag;
+    // Wheel 1 reads 45 m/s when ref is 30 m/s (delta = 15 m/s > PLAUSIBLE_SPEED_DELTA = 10.0)
+    std::vector<double> readings = {30.0, 45.0, 30.0, 30.0};
+    std::vector<BrakeState> states(4, BrakeState::APPLY);
+    double ref = 30.0;
+
+    for (int i = 0; i < 5; i++) {
+        diag.evaluate_cycle(i * 0.020, readings, ref, states);
+    }
+    EXPECT_TRUE(diag.has_dtc(DTC::C0040_REF_SPEED_IMPLAUSIBLE));
+}
+
+// Degraded control loop DTC (C0050) is raised when a wheel is stuck in RELEASE for 25 cycles.
+TEST(DiagnosticsManager, DegradedControlLoopDTCRaisedWhenWheelStuckInRelease) {
+    DiagnosticsManager diag;
+    std::vector<double> readings(4, 20.0);
+    std::vector<BrakeState> states = {BrakeState::RELEASE, BrakeState::APPLY, BrakeState::APPLY, BrakeState::APPLY};
+    double ref = 30.0;
+
+    for (int i = 0; i < 24; i++) {
+        diag.evaluate_cycle(i * 0.020, readings, ref, states);
+        EXPECT_FALSE(diag.has_dtc(DTC::C0050_CONTROL_LOOP_DEGRADED));
+    }
+
+    diag.evaluate_cycle(0.480, readings, ref, states);
+    EXPECT_TRUE(diag.has_dtc(DTC::C0050_CONTROL_LOOP_DEGRADED));
+}
+
+
+// =============================================================================
+// Suite 7: CANBus
+// =============================================================================
+
+TEST(CANBus, WheelSpeedFramePackUnpackRoundtrip) {
+    std::vector<double> original = {29.85, 29.83, 29.86, 29.90};
+    CANFrame frame = pack_wheel_speeds(0.040, original);
+
+    EXPECT_EQ(frame.id, CAN_ID_WHEEL_SPEEDS);
+    EXPECT_EQ(frame.dlc, 8);
+    EXPECT_DOUBLE_EQ(frame.timestamp, 0.040);
+
+    auto unpacked = unpack_wheel_speeds(frame);
+    ASSERT_EQ(unpacked.size(), 4u);
+    for (int i = 0; i < 4; i++) {
+        EXPECT_NEAR(unpacked[i], original[i], 0.015);
+    }
+}
+
+TEST(CANBus, ABSStatusFramePackUnpackRoundtrip) {
+    std::vector<BrakeState> original_states = {
+        BrakeState::RELEASE, BrakeState::HOLD, BrakeState::APPLY, BrakeState::RELEASE
+    };
+    CANFrame frame = pack_abs_status(0.100, original_states, true);
+
+    EXPECT_EQ(frame.id, CAN_ID_ABS_STATUS);
+    std::vector<BrakeState> unpacked_states;
+    bool unpacked_active = false;
+    unpack_abs_status(frame, unpacked_states, unpacked_active);
+
+    EXPECT_TRUE(unpacked_active);
+    ASSERT_EQ(unpacked_states.size(), 4u);
+    for (int i = 0; i < 4; i++) {
+        EXPECT_EQ(unpacked_states[i], original_states[i]);
+    }
+}
+
+TEST(CANBus, DiagnosticsFramePackUnpackRoundtrip) {
+    std::vector<DTC> dtcs = {DTC::C0031_W0_SENSOR_CIRCUIT, DTC::C0050_CONTROL_LOOP_DEGRADED};
+    CANFrame frame = pack_diagnostics(0.200, dtcs);
+
+    EXPECT_EQ(frame.id, CAN_ID_DIAGNOSTICS);
+    uint8_t count = 0, mask = 0;
+    unpack_diagnostics(frame, count, mask);
+
+    EXPECT_EQ(count, 2);
+    EXPECT_TRUE(mask & (1 << 0)); // C0031
+    EXPECT_TRUE(mask & (1 << 5)); // C0050
+    EXPECT_FALSE(mask & (1 << 4)); // C0040 not set
+}
+
+TEST(CANBus, TransmitAppendsToHistoryAndDumpsCSV) {
+    const std::string test_csv = "test_can_bus_export.csv";
+    std::remove(test_csv.c_str());
+
+    CANBus bus;
+    CANFrame f1 = pack_wheel_speeds(0.020, {30.0, 30.0, 30.0, 30.0});
+    CANFrame f2 = pack_abs_status(0.020, {BrakeState::APPLY, BrakeState::APPLY, BrakeState::APPLY, BrakeState::APPLY}, false);
+    bus.transmit(f1);
+    bus.transmit(f2);
+
+    EXPECT_EQ(bus.get_history().size(), 2u);
+
+    bus.dump_to_csv(test_csv);
+
+    std::ifstream file(test_csv);
+    ASSERT_TRUE(file.is_open());
+    std::string header;
+    std::getline(file, header);
+    EXPECT_NE(header.find("CAN_ID"), std::string::npos);
+
+    std::string line1, line2;
+    EXPECT_TRUE(std::getline(file, line1));
+    EXPECT_TRUE(std::getline(file, line2));
+    file.close();
+    std::remove(test_csv.c_str());
 }

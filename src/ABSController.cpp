@@ -38,7 +38,7 @@ void Vehicle::update(double avg_pressure, double dt) {
 // ABSController
 // ════════════════════════════════════════════════════════════════════════════
 
-ABSController::ABSController(Vehicle& v, double init_speed)
+ABSController::ABSController(Vehicle& v, double init_speed, const string& log_path)
     : vehicle(v),
       ref_speed_(init_speed),
       fault_injector_(nullptr) {
@@ -48,23 +48,25 @@ ABSController::ABSController(Vehicle& v, double init_speed)
         actuators.emplace_back();
     }
 
-    log_file.open("logs/abs_log.csv");
+    log_file.open(log_path);
 
     if (log_file.is_open()) {
         // S0-S3 : per-wheel ABS active flag (1 = this wheel is releasing pressure)
         // F0-F3 : fault type index (0=none, 1=bias, 2=lockup, 3=disconnected)
+        // Active_DTCs : active diagnostic trouble codes
         log_file << "Time(s),Veh_Speed,Est_Veh_Speed,"
                  << "W0_Speed,W1_Speed,W2_Speed,W3_Speed,"
                  << "P0,P1,P2,P3,"
                  << "S0,S1,S2,S3,"
                  << "F0,F1,F2,F3,"
-                 << "ABS_Active\n";
+                 << "ABS_Active,Active_DTCs\n";
     }
 }
 
 ABSController::~ABSController() {
     if (log_file.is_open())
         log_file.close();
+    can_bus_.dump_to_csv("logs/can_bus.csv");
 }
 
 // ── FaultInjector attachment ──────────────────────────────────────────────
@@ -140,9 +142,10 @@ void ABSController::control_cycle(double sim_time, double dt) {
         return;
 
     // ── Step 3: Compute slip and command actuators ────────────────────────
-    bool        abs_active = false;
-    vector<double> pressures(4);
-    vector<int>    wheel_abs(4, 0);   // per-wheel ABS active flag
+    bool               abs_active = false;
+    vector<double>     pressures(4);
+    vector<int>        wheel_abs(4, 0);   // per-wheel ABS active flag
+    vector<BrakeState> states(4);
 
     for (int i = 0; i < 4; i++) {
         double wheel_sp = readings[i];
@@ -166,10 +169,27 @@ void ABSController::control_cycle(double sim_time, double dt) {
         }
 
         actuators[i].command(cmd);
+        states[i]    = cmd;
         pressures[i] = actuators[i].get_pressure();
     }
 
-    // ── Step 4: CSV logging ───────────────────────────────────────────────
+    // ── Step 4: Diagnostics evaluation & CAN frame broadcast ──────────────
+    diagnostics_.evaluate_cycle(sim_time, readings, ref_speed_, states);
+
+    for (DTC code : diagnostics_.get_newly_raised()) {
+        cout << ">>> [DIAGNOSTIC EVENT] DTC RAISED: " << dtc_to_string(code)
+             << " at t = " << fixed << setprecision(2) << sim_time << " s\n";
+    }
+    for (DTC code : diagnostics_.get_newly_cleared()) {
+        cout << ">>> [DIAGNOSTIC EVENT] DTC CLEARED: " << dtc_to_string(code)
+             << " at t = " << fixed << setprecision(2) << sim_time << " s\n";
+    }
+
+    can_bus_.transmit(pack_wheel_speeds(sim_time, readings));
+    can_bus_.transmit(pack_abs_status(sim_time, states, abs_active));
+    can_bus_.transmit(pack_diagnostics(sim_time, diagnostics_.get_active_dtcs()));
+
+    // ── Step 5: CSV logging ───────────────────────────────────────────────
     if (log_file.is_open()) {
         log_file << fixed << setprecision(3)
                  << sim_time         << ","
@@ -200,7 +220,8 @@ void ABSController::control_cycle(double sim_time, double dt) {
             if (i < 3) log_file << ",";
         }
 
-        log_file << "," << (abs_active ? "1" : "0") << "\n";
+        log_file << "," << (abs_active ? "1" : "0")
+                 << "," << diagnostics_.get_active_dtcs_string() << "\n";
     }
 }
 
@@ -212,4 +233,20 @@ const vector<BrakeActuator>& ABSController::get_actuators() const {
 
 vector<WheelSpeedSensor>& ABSController::get_sensors() {
     return sensors;
+}
+
+DiagnosticsManager& ABSController::get_diagnostics() {
+    return diagnostics_;
+}
+
+const DiagnosticsManager& ABSController::get_diagnostics() const {
+    return diagnostics_;
+}
+
+CANBus& ABSController::get_can_bus() {
+    return can_bus_;
+}
+
+const CANBus& ABSController::get_can_bus() const {
+    return can_bus_;
 }

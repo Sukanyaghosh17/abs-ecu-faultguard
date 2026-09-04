@@ -39,6 +39,8 @@ Design principles:
 - CSV logging — W0-W3 log the **post-fault sensor reading** used by the controller
 - Configurable constants (`constexpr`)
 - **Fault injection** — 3 fault types (bias, lockup, disconnected), configured via CLI flags
+- **Diagnostics Manager** — real-time detection of sensor circuit malfunctions (`C0031`–`C0034`), reference speed implausibility (`C0040`), and degraded control loops (`C0050`)
+- **CAN bus simulation** — broadcast and logging of `0x0C0` (wheel speeds), `0x0C1` (ABS status), and `0x0C2` (DTC diagnostics) frames to `logs/can_bus.csv`
 - **2x2 visualization dashboard** — wheel speeds, vehicle speed vs. ECU reference, slip ratios, and brake pressures (with fault regions shaded)
 
 ---
@@ -62,7 +64,7 @@ cmake --build build
 
 ## Testing
 
-Unit tests are implemented with GoogleTest (fetched automatically via CMake `FetchContent`). The current suite includes 19 tests covering the `SlipCalculation`, `StateTransition`, `FaultInjector`, and `ReferenceSpeed` suites.
+Unit tests are implemented with GoogleTest (fetched automatically via CMake `FetchContent`). The current suite includes 31 tests covering `SlipCalculation`, `StateTransition`, `FaultInjector`, `ReferenceSpeed`, `Regression`, `DiagnosticsManager`, and `CANBus`.
 
 Run tests locally:
 
@@ -76,7 +78,7 @@ cd build && ctest --output-on-failure
 ## Running
 
 - Starts at 30 m/s (~108 km/h)
-- Generates `logs/abs_log.csv`
+- Generates `logs/abs_log.csv` and `logs/can_bus.csv`
 - Run `python scripts/analyze_log.py` after simulation to produce the dashboard
 
 ---
@@ -127,12 +129,13 @@ The ECU is completely unaware of whether a reading is faulted — it operates on
 | `S0`...`S3` | Per-wheel ABS active flag (1 = this wheel is currently releasing pressure) |
 | `F0`...`F3` | Fault type index per wheel (0=none, 1=bias, 2=lockup, 3=disconnected) |
 | `ABS_Active` | Overall ABS flag (1 = at least one wheel releasing pressure) |
+| `Active_DTCs` | Active Diagnostic Trouble Codes separated by semicolons (or `NONE` if nominal) |
 
-**Example row (wheel 0 lockup fault active):**
+**Example row (wheel 0 lockup fault active with C0031 trouble code):**
 
 ```csv
-Time(s),Veh_Speed,Est_Veh_Speed,W0_Speed,W1_Speed,W2_Speed,W3_Speed,P0,P1,P2,P3,S0,S1,S2,S3,F0,F1,F2,F3,ABS_Active
-0.020,29.984,29.982,0.100,29.950,29.950,29.950,10.000,20.000,20.000,20.000,1,0,0,0,2,0,0,0,1
+Time(s),Veh_Speed,Est_Veh_Speed,W0_Speed,W1_Speed,W2_Speed,W3_Speed,P0,P1,P2,P3,S0,S1,S2,S3,F0,F1,F2,F3,ABS_Active,Active_DTCs
+0.200,29.840,29.900,0.100,29.850,29.830,29.860,10.000,30.000,30.000,30.000,1,0,0,0,2,0,0,0,1,C0031
 ```
 
 ---
@@ -155,8 +158,10 @@ t = 0.20 s | Vehicle: 29.84 m/s | Ref: 29.90 m/s
 - **BrakeActuator** — hydraulic actuator with `BrakeState` (APPLY/HOLD/RELEASE) and pressure ramping
 - **WheelSpeedSensor** — wheel speed sensor with Gaussian noise
 - **FaultInjector** — sits between the raw sensor and the ECU; applies per-wheel fault transforms
+- **DiagnosticsManager** — evaluates sensor circuit plausibility, reference anomalies, and stuck actuator conditions to raise/clear DTCs (`C0031`–`C0050`)
+- **CANBus** — simulates broadcast frame transmission (`CANFrame`) for wheel speeds (`0x0C0`), ABS status (`0x0C1`), and diagnostics (`0x0C2`), dumping to `logs/can_bus.csv`
 - **Vehicle** — updates vehicle speed based on average brake pressure (plant model)
-- **ABSController** — manages sensors/actuators, runs peak-hold estimator, calculates slip, commands brakes, logs CSV
+- **ABSController** — manages sensors/actuators, runs peak-hold estimator, calculates slip, commands brakes, evaluates diagnostics, broadcasts CAN frames, logs CSV
 - **main()** — real-time loop: CLI fault parsing -> ECU control cycle -> physics update -> console output
 
 ---
@@ -185,11 +190,21 @@ t = 0.20 s | Vehicle: 29.84 m/s | Ref: 29.90 m/s
 
 ---
 
+## Debugging Journey
+
+A chronological record of real engineering bugs identified and resolved during development:
+
+1. **Vehicle Speed Reference Collapse**: When all four wheels locked simultaneously, the original estimator (which simply averaged wheel readings) collapsed to zero alongside the wheels, resulting in calculated slip near zero and preventing ABS release. This was discovered during full-lockup testing and resolved by implementing a peak-hold estimator anchored to the highest wheel speed and rate-limited by maximum physical vehicle deceleration (`MAX_REF_DECEL`).
+2. **Double Sensor Sampling per Cycle**: Wheel sensors were originally sampled twice per 20 ms cycle—once for vehicle speed estimation and a second time for slip ratio calculation. Because each call evaluated fresh Gaussian noise, the two calculations operated on contradictory states. This was identified via erratic slip transitions and fixed by sampling each sensor exactly once into a cycle-scoped `readings` buffer.
+3. **CSV Post-Fault Logging Inconsistency**: The CSV logging loop originally wrote `sensors[i].get_true_speed()` rather than the post-fault values `readings[i]` computed in Step 1. Consequently, running fault injection commands (e.g., `--fault wheel=0 type=lockup`) activated controller reactions but left wheel speed curves in `analyze_log.py` looking uncorrupted. This was fixed by directing `W0_Speed..W3_Speed` to log `readings[i]`.
+4. **CI Smoke-Test Abortion under `bash -eo pipefail`**: GitHub Actions executes run steps with `set -e` enabled by default, causing the runner to immediately abort when `timeout 5 ./build/abs_ecu_sim` returned the expected exit code 124 (timeout budget reached). The intended conditional check (`if [ $code -ne 0 ] && [ $code -ne 124 ]`) was never reached, failing all CI builds. This was fixed by encapsulating the call inside a `set +e` / `set -e` bracket.
+
+---
+
 ## Future Enhancements
 
 - Advanced ABS algorithms (PID, adaptive slip)
 - Enhanced physics (load transfer, per-wheel friction coefficient)
-- CAN bus simulation
 - HIL testing
 - Multi-threaded sensor/control/logging threads
 

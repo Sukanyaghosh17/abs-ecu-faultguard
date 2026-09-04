@@ -1,10 +1,13 @@
 #pragma once
 
 #include <vector>
+#include <string>
 #include <fstream>
 #include "Sensor.hpp"
 #include "Wheel.hpp"
 #include "FaultInjector.hpp"
+#include "DiagnosticsManager.hpp"
+#include "CANBus.hpp"
 
 // ── ECU slip-control thresholds ────────────────────────────────────────────
 // Declared in the header (not ABSController.cpp) so that unit tests can
@@ -45,7 +48,8 @@ public:
 //      deceleration-limited estimator (so the reference does not collapse
 //      when all wheels lock simultaneously).
 //   3. Computes per-wheel slip ratios and commands APPLY / HOLD / RELEASE.
-//   4. Logs the full state to a CSV file.
+//   4. Evaluates diagnostics (DTCs) and broadcasts CAN frames.
+//   5. Logs the full state to a CSV file.
 class ABSController {
 
 private:
@@ -61,6 +65,9 @@ private:
     // Optional fault injector — nullptr means no faults active.
     FaultInjector* fault_injector_;
 
+    DiagnosticsManager diagnostics_;
+    CANBus             can_bus_;
+
     std::ofstream log_file;
 
     // Internal helper: update ref_speed_ from latest sensor readings.
@@ -69,7 +76,7 @@ private:
     void update_reference_speed(const std::vector<double>& readings, double dt);
 
 public:
-    ABSController(Vehicle& v, double init_speed);
+    ABSController(Vehicle& v, double init_speed, const std::string& log_path = "logs/abs_log.csv");
 
     ~ABSController();
 
@@ -88,4 +95,10 @@ public:
 
     const std::vector<BrakeActuator>& get_actuators() const;
     std::vector<WheelSpeedSensor>&    get_sensors();
+
+    DiagnosticsManager&       get_diagnostics();
+    const DiagnosticsManager& get_diagnostics() const;
+
+    CANBus&       get_can_bus();
+    const CANBus& get_can_bus() const;
 };
