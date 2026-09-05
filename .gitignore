@@ -22,6 +22,7 @@ out/
 # Python
 __pycache__/
 *.pyc
+.venv/
 
 # OS generated
 Thumbs.db
